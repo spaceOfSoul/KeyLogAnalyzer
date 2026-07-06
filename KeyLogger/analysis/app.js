@@ -9,6 +9,7 @@
     ipsChartType: 'line',
     keyPlotMode: 'raster',
     activeTab: 'ips',
+    keyPlotHeights: new Map(),
   };
 
   const els = {};
@@ -218,6 +219,9 @@
     const minVisualMs = rangeSpan * 0.001;
 
     for (const k of keys) {
+      const block = document.createElement('div');
+      block.className = 'key-plot-block';
+
       const row = document.createElement('div');
       row.className = 'key-plot-row';
       const nameEl = document.createElement('div');
@@ -225,11 +229,21 @@
       nameEl.textContent = k;
       const wrap = document.createElement('div');
       wrap.className = 'chart-wrap';
+      const savedHeight = state.keyPlotHeights.get(k);
+      if (savedHeight) wrap.style.height = `${savedHeight}px`;
       const canvas = document.createElement('canvas');
       wrap.appendChild(canvas);
       row.appendChild(nameEl);
       row.appendChild(wrap);
-      els.keyPlots.appendChild(row);
+
+      const handle = document.createElement('div');
+      handle.className = 'resize-handle resize-handle-sm';
+      handle.title = '드래그해서 세로 크기 조절';
+      handle.appendChild(document.createElement('span'));
+
+      block.appendChild(row);
+      block.appendChild(handle);
+      els.keyPlots.appendChild(block);
 
       const keyEvents = filteredEvents.filter((e) => e.k === k);
 
@@ -305,6 +319,11 @@
       }
 
       keyCharts.set(k, chart);
+      makeVerticallyResizable(wrap, handle, () => keyCharts.get(k), {
+        minHeight: 40,
+        maxHeight: 500,
+        onHeightChange: (h) => state.keyPlotHeights.set(k, h),
+      });
     }
   }
 
@@ -315,6 +334,39 @@
     } else {
       renderKeyPlots(filtered);
     }
+  }
+
+  function makeVerticallyResizable(wrapEl, handleEl, getChart, options) {
+    const opts = options || {};
+    const MIN_HEIGHT = opts.minHeight || 150;
+    const MAX_HEIGHT = opts.maxHeight || 900;
+    let startY = 0;
+    let startHeight = 0;
+
+    const onPointerMove = (ev) => {
+      const delta = ev.clientY - startY;
+      const next = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, startHeight + delta));
+      wrapEl.style.height = `${next}px`;
+      const chart = getChart();
+      if (chart) chart.resize();
+      if (opts.onHeightChange) opts.onHeightChange(next);
+    };
+
+    const onPointerUp = (ev) => {
+      handleEl.classList.remove('dragging');
+      handleEl.releasePointerCapture(ev.pointerId);
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+    };
+
+    handleEl.addEventListener('pointerdown', (ev) => {
+      startY = ev.clientY;
+      startHeight = wrapEl.getBoundingClientRect().height;
+      handleEl.classList.add('dragging');
+      handleEl.setPointerCapture(ev.pointerId);
+      document.addEventListener('pointermove', onPointerMove);
+      document.addEventListener('pointerup', onPointerUp);
+    });
   }
 
   function switchTab(tab) {
@@ -341,12 +393,16 @@
     els.statMin = document.getElementById('statMin');
     els.statMed = document.getElementById('statMed');
     els.ipsCanvas = document.getElementById('ipsChart');
+    els.ipsChartWrap = document.getElementById('ipsChartWrap');
+    els.ipsResizeHandle = document.getElementById('ipsResizeHandle');
     els.keyPlots = document.getElementById('keyPlots');
     els.emptyNote = document.getElementById('emptyNote');
 
     if (typeof Chart !== 'undefined' && window.ChartZoom) {
       Chart.register(window.ChartZoom);
     }
+
+    makeVerticallyResizable(els.ipsChartWrap, els.ipsResizeHandle, () => ipsChart, { minHeight: 150, maxHeight: 900 });
 
     if (RAW_EVENTS.length === 0) {
       els.emptyNote.style.display = 'block';

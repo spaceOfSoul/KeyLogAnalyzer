@@ -11,11 +11,22 @@
     keyPlotMode: 'raster',
     activeTab: 'ips',
     keyPlotHeights: new Map(),
+    playback: {
+      playing: false,
+      posMs: 0,
+      speed: 1,
+      noteSpeedPxPerSec: 300,
+      noteW: 24,
+      noteH: 24,
+      lastPerf: 0,
+    },
   };
 
   const els = {};
   let ipsChart = null;
   const keyCharts = new Map();
+  let playbackKeys = [];
+  let playbackRafId = null;
 
   function fmtDateTimeLocal(ms) {
     const d = new Date(ms);
@@ -362,8 +373,10 @@
     const filtered = getFilteredEvents();
     if (state.activeTab === 'ips') {
       renderIpsChart(filtered);
-    } else {
+    } else if (state.activeTab === 'details') {
       renderKeyPlots(filtered);
+    } else if (state.activeTab === 'playback') {
+      resetPlayback();
     }
   }
 
@@ -401,10 +414,165 @@
   }
 
   function switchTab(tab) {
+    if (state.activeTab === 'playback' && tab !== 'playback') {
+      stopPlaybackLoop();
+    }
     state.activeTab = tab;
     els.tabButtons.forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
     els.tabPanels.forEach((p) => p.classList.toggle('tab-hidden', p.dataset.tabPanel !== tab));
     render();
+  }
+
+  // ------------------------------
+  // 시각화 재생 ("음악 게임 노트"식 canvas 애니메이션)
+  // 각 선택된 키는 같은 X, 다른 Y에 생성 지점(레인)을 가지며, 눌린 시점에 그 위치에서
+  // 노트가 생성되어 오른쪽으로 등속 이동하다 캔버스 밖으로 나가면 사라진다.
+  // ------------------------------
+  const PLAYBACK_SPAWN_X = 70;
+  const PLAYBACK_TOP_MARGIN = 36; // progress 텍스트 공간
+  const PLAYBACK_LANE_PADDING = 16;
+
+  function getPlaybackKeys() {
+    return Array.from(state.selectedKeys).sort((a, b) => a.localeCompare(b));
+  }
+
+  function layoutPlaybackCanvas() {
+    const wrap = els.playbackCanvasWrap;
+    const canvas = els.playbackCanvas;
+    const width = Math.max(320, wrap.clientWidth);
+    const laneH = Math.max(state.playback.noteH + PLAYBACK_LANE_PADDING, 40);
+    const height = PLAYBACK_TOP_MARGIN + laneH * Math.max(1, playbackKeys.length);
+
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.height = `${height}px`;
+    return { width, height, laneH };
+  }
+
+  function laneCenterY(index, laneH) {
+    return PLAYBACK_TOP_MARGIN + laneH * index + laneH / 2;
+  }
+
+  function drawPlaybackFrame() {
+    const canvas = els.playbackCanvas;
+    const ctx = canvas.getContext('2d');
+    const { width, height, laneH } = layoutPlaybackCanvas();
+
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = '#000';
+    ctx.font = '13px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`${Math.floor(state.playback.posMs)}ms`, 8, 8);
+
+    const spawnW = state.playback.noteW + 8;
+    const spawnH = state.playback.noteH + 8;
+    const noteW = state.playback.noteW;
+    const noteH = state.playback.noteH;
+
+    const absNow = state.rangeStart + state.playback.posMs;
+    const lifetimeMs = ((width - PLAYBACK_SPAWN_X) / state.playback.noteSpeedPxPerSec) * 1000;
+
+    const downEvents = getFilteredEvents().filter((e) => e.d);
+
+    playbackKeys.forEach((k, i) => {
+      const cy = laneCenterY(i, laneH);
+
+      // 입력 노트를 먼저 그린다 (생성 지점 바로 위에 막 생성된 노트가 라벨을 가리지 않도록,
+      // 생성 지점+라벨은 항상 마지막에 그려서 위에 보이게 한다).
+      for (const e of downEvents) {
+        if (e.k !== k) continue;
+        const elapsed = absNow - e.t;
+        if (elapsed < 0 || elapsed > lifetimeMs) continue;
+        const traveled = (elapsed / 1000) * state.playback.noteSpeedPxPerSec;
+        const nx = PLAYBACK_SPAWN_X + traveled;
+
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(nx - noteW / 2, cy - noteH / 2, noteW, noteH);
+        ctx.strokeRect(nx - noteW / 2, cy - noteH / 2, noteW, noteH);
+      }
+
+      // 생성 지점: 검은 테두리, 흰 배경, 검은 글자
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.fillRect(PLAYBACK_SPAWN_X - spawnW / 2, cy - spawnH / 2, spawnW, spawnH);
+      ctx.strokeRect(PLAYBACK_SPAWN_X - spawnW / 2, cy - spawnH / 2, spawnW, spawnH);
+      ctx.fillStyle = '#000';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(k, PLAYBACK_SPAWN_X, cy);
+    });
+  }
+
+  function updatePlaybackProgressBar() {
+    const duration = Math.max(1, state.rangeEnd - state.rangeStart);
+    const pct = Math.min(100, (state.playback.posMs / duration) * 100);
+    els.playbackProgressFill.style.width = `${pct}%`;
+  }
+
+  function playbackTick(nowPerf) {
+    if (!state.playback.playing) return;
+    const dt = nowPerf - state.playback.lastPerf;
+    state.playback.lastPerf = nowPerf;
+    state.playback.posMs += dt * state.playback.speed;
+
+    const duration = state.rangeEnd - state.rangeStart;
+    if (state.playback.posMs >= duration) {
+      state.playback.posMs = duration;
+      state.playback.playing = false;
+      els.playbackToggleBtn.textContent = '▶ 재생';
+    }
+
+    drawPlaybackFrame();
+    updatePlaybackProgressBar();
+
+    if (state.playback.playing) {
+      playbackRafId = requestAnimationFrame(playbackTick);
+    }
+  }
+
+  function startPlaybackLoop() {
+    if (state.playback.playing) return;
+    if (state.playback.posMs >= state.rangeEnd - state.rangeStart) {
+      state.playback.posMs = 0;
+    }
+    state.playback.playing = true;
+    state.playback.lastPerf = performance.now();
+    els.playbackToggleBtn.textContent = '⏸ 정지';
+    playbackRafId = requestAnimationFrame(playbackTick);
+  }
+
+  function stopPlaybackLoop() {
+    state.playback.playing = false;
+    if (playbackRafId !== null) {
+      cancelAnimationFrame(playbackRafId);
+      playbackRafId = null;
+    }
+    if (els.playbackToggleBtn) els.playbackToggleBtn.textContent = '▶ 재생';
+  }
+
+  // 필터/키 선택이 바뀌거나 'playback' 탭에 처음 들어왔을 때: 재생을 멈추고 처음부터 다시 그린다.
+  function resetPlayback() {
+    stopPlaybackLoop();
+    state.playback.posMs = 0;
+    playbackKeys = getPlaybackKeys();
+
+    if (playbackKeys.length === 0) {
+      els.playbackEmptyNote.style.display = 'block';
+      els.playbackArea.style.display = 'none';
+      return;
+    }
+
+    els.playbackEmptyNote.style.display = 'none';
+    els.playbackArea.style.display = '';
+    drawPlaybackFrame();
+    updatePlaybackProgressBar();
   }
 
   function recomputeDataBounds() {
@@ -495,6 +663,19 @@
     els.emptyNote = document.getElementById('emptyNote');
     els.refreshBtn = document.getElementById('refreshBtn');
     els.refreshStatus = document.getElementById('refreshStatus');
+    els.filterHeader = document.getElementById('filterHeader');
+    els.filterBody = document.getElementById('filterBody');
+    els.filterToggleBtn = document.getElementById('filterToggleBtn');
+    els.playbackEmptyNote = document.getElementById('playbackEmptyNote');
+    els.playbackArea = document.getElementById('playbackArea');
+    els.playbackCanvasWrap = document.getElementById('playbackCanvasWrap');
+    els.playbackCanvas = document.getElementById('playbackCanvas');
+    els.playbackToggleBtn = document.getElementById('playbackToggleBtn');
+    els.playbackSpeed = document.getElementById('playbackSpeed');
+    els.playbackNoteSpeed = document.getElementById('playbackNoteSpeed');
+    els.playbackNoteW = document.getElementById('playbackNoteW');
+    els.playbackNoteH = document.getElementById('playbackNoteH');
+    els.playbackProgressFill = document.getElementById('playbackProgressFill');
 
     if (typeof Chart !== 'undefined' && window.ChartZoom) {
       Chart.register(window.ChartZoom);
@@ -503,6 +684,11 @@
     makeVerticallyResizable(els.ipsChartWrap, els.ipsResizeHandle, () => ipsChart, { minHeight: 150, maxHeight: 900 });
 
     els.refreshBtn.addEventListener('click', refreshData);
+
+    els.filterHeader.addEventListener('click', () => {
+      const collapsed = els.filterBody.classList.toggle('collapsed');
+      els.filterToggleBtn.classList.toggle('collapsed', collapsed);
+    });
 
     els.keySearch.addEventListener('input', () => {
       buildKeyFilterUI(allKeys, els.keySearch.value);
@@ -579,6 +765,26 @@
         els.quickRangeButtons.forEach((b) => b.classList.toggle('active', b === btn));
         render();
       });
+    });
+
+    els.playbackToggleBtn.addEventListener('click', () => {
+      if (state.playback.playing) stopPlaybackLoop();
+      else startPlaybackLoop();
+    });
+    els.playbackSpeed.addEventListener('change', () => {
+      state.playback.speed = Number(els.playbackSpeed.value);
+    });
+    els.playbackNoteSpeed.addEventListener('input', () => {
+      state.playback.noteSpeedPxPerSec = Number(els.playbackNoteSpeed.value);
+      if (!state.playback.playing) drawPlaybackFrame();
+    });
+    els.playbackNoteW.addEventListener('input', () => {
+      state.playback.noteW = Math.max(4, Number(els.playbackNoteW.value) || 4);
+      if (!state.playback.playing) drawPlaybackFrame();
+    });
+    els.playbackNoteH.addEventListener('input', () => {
+      state.playback.noteH = Math.max(4, Number(els.playbackNoteH.value) || 4);
+      if (!state.playback.playing) drawPlaybackFrame();
     });
 
     render();

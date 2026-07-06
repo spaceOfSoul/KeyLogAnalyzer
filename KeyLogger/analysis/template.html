@@ -20,46 +20,52 @@
 
 <div id="mainPanels">
   <div class="panel">
-    <h2>시점 / 키 필터</h2>
-    <div class="row">
-      <div class="field">
-        <label>시작 시점</label>
-        <input type="datetime-local" id="rangeStart" step="1" />
-      </div>
-      <div class="field">
-        <label>종료 시점</label>
-        <input type="datetime-local" id="rangeEnd" step="1" />
-      </div>
-      <div class="field">
-        <label>&nbsp;</label>
-        <div class="row">
-          <button id="selectAllKeys">전체 선택</button>
-          <button id="selectNoneKeys">전체 해제</button>
+    <div class="panel-header-row" id="filterHeader">
+      <h2>시점 / 키 필터</h2>
+      <button id="filterToggleBtn" class="collapse-toggle" title="접기/펴기">▾</button>
+    </div>
+    <div id="filterBody">
+      <div class="row">
+        <div class="field">
+          <label>시작 시점</label>
+          <input type="datetime-local" id="rangeStart" step="1" />
+        </div>
+        <div class="field">
+          <label>종료 시점</label>
+          <input type="datetime-local" id="rangeEnd" step="1" />
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <div class="row">
+            <button id="selectAllKeys">전체 선택</button>
+            <button id="selectNoneKeys">전체 해제</button>
+          </div>
         </div>
       </div>
+      <div class="row quick-range-row">
+        <span style="font-size:12px;opacity:0.7">최근</span>
+        <button data-quick-range="10000">10초</button>
+        <button data-quick-range="30000">30초</button>
+        <button data-quick-range="60000">1분</button>
+        <button data-quick-range="90000">1분30초</button>
+        <button data-quick-range="120000">2분</button>
+        <button data-quick-range="180000">3분</button>
+        <button data-quick-range="600000">10분</button>
+        <button data-quick-range="1200000">20분</button>
+        <button data-quick-range="1800000">30분</button>
+        <button data-quick-range="2400000">40분</button>
+        <button data-quick-range="3600000">1시간</button>
+        <button data-quick-range="all">전체</button>
+      </div>
+      <input type="text" id="keySearch" class="key-search" placeholder="키 검색..." />
+      <div id="keyGrid" class="key-grid"></div>
     </div>
-    <div class="row quick-range-row">
-      <span style="font-size:12px;opacity:0.7">최근</span>
-      <button data-quick-range="10000">10초</button>
-      <button data-quick-range="30000">30초</button>
-      <button data-quick-range="60000">1분</button>
-      <button data-quick-range="90000">1분30초</button>
-      <button data-quick-range="120000">2분</button>
-      <button data-quick-range="180000">3분</button>
-      <button data-quick-range="600000">10분</button>
-      <button data-quick-range="1200000">20분</button>
-      <button data-quick-range="1800000">30분</button>
-      <button data-quick-range="2400000">40분</button>
-      <button data-quick-range="3600000">1시간</button>
-      <button data-quick-range="all">전체</button>
-    </div>
-    <input type="text" id="keySearch" class="key-search" placeholder="키 검색..." />
-    <div id="keyGrid" class="key-grid"></div>
   </div>
 
   <div class="tab-bar">
     <button class="tab-btn active" data-tab="ips">IPS</button>
     <button class="tab-btn" data-tab="details">눌린 키 상세</button>
+    <button class="tab-btn" data-tab="playback">시각화 재생</button>
   </div>
 
   <div class="panel tab-panel" data-tab-panel="ips">
@@ -92,6 +98,41 @@
       <button data-key-mode="timing">timing diagram</button>
     </div>
     <div id="keyPlots"></div>
+  </div>
+
+  <div class="panel tab-panel tab-hidden" data-tab-panel="playback">
+    <h2>시각화 재생</h2>
+    <div id="playbackEmptyNote" class="empty-note">키를 선택하면 재생할 수 있습니다.</div>
+    <div id="playbackArea" style="display:none">
+      <div class="playback-canvas-wrap" id="playbackCanvasWrap">
+        <canvas id="playbackCanvas"></canvas>
+      </div>
+      <div class="playback-bar">
+        <button id="playbackToggleBtn">▶ 재생</button>
+        <label class="playback-field">배속
+          <select id="playbackSpeed">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2x</option>
+            <option value="4">4x</option>
+          </select>
+        </label>
+        <label class="playback-field">이동 간격
+          <input type="range" id="playbackNoteSpeed" min="50" max="1000" step="10" value="300" />
+        </label>
+        <label class="playback-field">노트 너비
+          <input type="number" id="playbackNoteW" min="8" max="120" value="24" />
+        </label>
+        <label class="playback-field">노트 높이
+          <input type="number" id="playbackNoteH" min="8" max="120" value="24" />
+        </label>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="playbackProgressFill"></div>
+      </div>
+    </div>
   </div>
 </div>
 

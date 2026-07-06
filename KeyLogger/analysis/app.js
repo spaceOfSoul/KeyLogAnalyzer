@@ -45,9 +45,11 @@
     return Array.from(s).sort((a, b) => a.localeCompare(b));
   }
 
-  function buildKeyFilterUI(keys) {
+  function buildKeyFilterUI(keys, searchTerm) {
     els.keyGrid.innerHTML = '';
-    for (const k of keys) {
+    const term = (searchTerm || '').trim().toLowerCase();
+    const visibleKeys = term ? keys.filter((k) => k.toLowerCase().includes(term)) : keys;
+    for (const k of visibleKeys) {
       const label = document.createElement('label');
       const cb = document.createElement('input');
       cb.type = 'checkbox';
@@ -326,6 +328,7 @@
     els.startInput = document.getElementById('rangeStart');
     els.endInput = document.getElementById('rangeEnd');
     els.keyGrid = document.getElementById('keyGrid');
+    els.keySearch = document.getElementById('keySearch');
     els.selectAllBtn = document.getElementById('selectAllKeys');
     els.selectNoneBtn = document.getElementById('selectNoneKeys');
     els.bucketButtons = document.querySelectorAll('[data-bucket]');
@@ -358,7 +361,11 @@
     els.endInput.value = fmtDateTimeLocal(state.rangeEnd);
 
     const keys = getDistinctKeys();
-    buildKeyFilterUI(keys);
+    buildKeyFilterUI(keys, els.keySearch.value);
+
+    els.keySearch.addEventListener('input', () => {
+      buildKeyFilterUI(keys, els.keySearch.value);
+    });
 
     els.startInput.addEventListener('change', () => {
       const v = parseDateTimeLocal(els.startInput.value);
@@ -373,12 +380,12 @@
 
     els.selectAllBtn.addEventListener('click', () => {
       state.selectedKeys = new Set(keys);
-      buildKeyFilterUI(keys);
+      buildKeyFilterUI(keys, els.keySearch.value);
       render();
     });
     els.selectNoneBtn.addEventListener('click', () => {
       state.selectedKeys.clear();
-      buildKeyFilterUI(keys);
+      buildKeyFilterUI(keys, els.keySearch.value);
       render();
     });
 

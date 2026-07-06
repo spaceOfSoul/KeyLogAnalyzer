@@ -34,6 +34,36 @@
     return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
+  // spanMs: 현재 축에 보이는 시간 범위. 좁을수록(확대될수록) 소수점 자리수를 늘린다.
+  function pickDecimals(spanMs) {
+    if (spanMs < 100) return 3;
+    if (spanMs < 1000) return 2;
+    if (spanMs < 10000) return 1;
+    return 0;
+  }
+
+  function fmtClockAdaptive(ms, spanMs) {
+    const decimals = pickDecimals(spanMs);
+    const base = fmtClock(ms);
+    if (decimals === 0) return base;
+    const msPart = String(new Date(ms).getMilliseconds()).padStart(3, '0').slice(0, decimals);
+    return `${base}.${msPart}`;
+  }
+
+  // Chart.js가 tick callback을 스케일 인스턴스에 바인딩해서(this=scale) 호출하므로
+  // 화살표 함수가 아닌 일반 함수여야 this.min/this.max로 현재 확대 범위를 읽을 수 있다.
+  function adaptiveTickCallback(value) {
+    const span = this.max - this.min;
+    return fmtClockAdaptive(value, span);
+  }
+
+  function adaptiveTooltipTitle(items) {
+    if (!items.length) return '';
+    const scale = items[0].chart.scales.x;
+    const span = scale.max - scale.min;
+    return fmtClockAdaptive(items[0].parsed.x, span);
+  }
+
   function unitLabel(bucketMs) {
     if (bucketMs === 1000) return 'IPS (input/s)';
     if (bucketMs >= 1000) return `input/${bucketMs / 1000}s`;
@@ -107,7 +137,7 @@
   function timeLinearScale() {
     return {
       type: 'linear',
-      ticks: { callback: (v) => fmtClock(v) },
+      ticks: { callback: adaptiveTickCallback },
     };
   }
 
@@ -176,7 +206,7 @@
         plugins: {
           tooltip: {
             callbacks: {
-              title: (items) => (items.length ? fmtClock(items[0].parsed.x) : ''),
+              title: adaptiveTooltipTitle,
               label: (item) => `${item.dataset.label}: ${item.parsed.y}`,
             },
           },
@@ -267,12 +297,12 @@
             responsive: true,
             maintainAspectRatio: false,
             scales: {
-              x: { type: 'linear', min: state.rangeStart, max: state.rangeEnd, ticks: { callback: (v) => fmtClock(v) } },
+              x: { type: 'linear', min: state.rangeStart, max: state.rangeEnd, ticks: { callback: adaptiveTickCallback } },
               y: { min: 0, max: 1, display: false },
             },
             plugins: {
               legend: { display: false },
-              tooltip: { callbacks: { title: (items) => (items.length ? fmtClock(items[0].parsed.x) : '') } },
+              tooltip: { callbacks: { title: adaptiveTooltipTitle } },
               zoom: zoomPluginOptions(),
             },
           },
@@ -306,12 +336,12 @@
             responsive: true,
             maintainAspectRatio: false,
             scales: {
-              x: { type: 'linear', min: state.rangeStart, max: state.rangeEnd, ticks: { callback: (v) => fmtClock(v) } },
+              x: { type: 'linear', min: state.rangeStart, max: state.rangeEnd, ticks: { callback: adaptiveTickCallback } },
               y: { min: 0, max: 1, display: false },
             },
             plugins: {
               legend: { display: false },
-              tooltip: { callbacks: { title: (items) => (items.length ? fmtClock(items[0].parsed.x) : '') } },
+              tooltip: { callbacks: { title: adaptiveTooltipTitle } },
               zoom: zoomPluginOptions(),
             },
           },
@@ -388,6 +418,7 @@
     els.keyModeButtons = document.querySelectorAll('[data-key-mode]');
     els.tabButtons = document.querySelectorAll('[data-tab]');
     els.tabPanels = document.querySelectorAll('[data-tab-panel]');
+    els.quickRangeButtons = document.querySelectorAll('[data-quick-range]');
     els.statAvg = document.getElementById('statAvg');
     els.statMax = document.getElementById('statMax');
     els.statMin = document.getElementById('statMin');
@@ -411,8 +442,12 @@
     }
 
     const times = RAW_EVENTS.map((e) => e.t);
-    state.rangeStart = Math.min(...times);
-    state.rangeEnd = Math.max(...times);
+    state.dataMin = Math.min(...times);
+    state.dataMax = Math.max(...times);
+    state.viewNow = Date.now();
+
+    state.rangeEnd = state.viewNow;
+    state.rangeStart = state.viewNow - 10 * 60 * 1000;
     els.startInput.value = fmtDateTimeLocal(state.rangeStart);
     els.endInput.value = fmtDateTimeLocal(state.rangeEnd);
 
@@ -426,11 +461,13 @@
     els.startInput.addEventListener('change', () => {
       const v = parseDateTimeLocal(els.startInput.value);
       if (v !== null) state.rangeStart = v;
+      els.quickRangeButtons.forEach((b) => b.classList.remove('active'));
       render();
     });
     els.endInput.addEventListener('change', () => {
       const v = parseDateTimeLocal(els.endInput.value);
       if (v !== null) state.rangeEnd = v;
+      els.quickRangeButtons.forEach((b) => b.classList.remove('active'));
       render();
     });
 
@@ -468,6 +505,23 @@
     });
     els.tabButtons.forEach((btn) => {
       btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    els.quickRangeButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const spec = btn.dataset.quickRange;
+        if (spec === 'all') {
+          state.rangeStart = state.dataMin;
+          state.rangeEnd = state.dataMax;
+        } else {
+          state.rangeEnd = state.viewNow;
+          state.rangeStart = state.viewNow - Number(spec);
+        }
+        els.startInput.value = fmtDateTimeLocal(state.rangeStart);
+        els.endInput.value = fmtDateTimeLocal(state.rangeEnd);
+        els.quickRangeButtons.forEach((b) => b.classList.toggle('active', b === btn));
+        render();
+      });
     });
 
     render();

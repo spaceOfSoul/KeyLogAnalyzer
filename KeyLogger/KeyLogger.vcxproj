@@ -142,7 +142,21 @@
     <Image Include="KeyLogger.ico" />
     <Image Include="small.ico" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="analysis\template.html" />
+    <None Include="analysis\app.js" />
+    <None Include="analysis\style.css" />
+    <None Include="analysis\vendor\chart.umd.min.js" />
+    <None Include="analysis\vendor\chartjs-plugin-zoom.min.js" />
+    <None Include="analysis\vendor\hammer.min.js" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Target Name="CopyAnalysisAssets" AfterTargets="Build">
+    <ItemGroup>
+      <AnalysisAssets Include="$(ProjectDir)analysis\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(AnalysisAssets)" DestinationFolder="$(OutDir)analysis\%(RecursiveDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

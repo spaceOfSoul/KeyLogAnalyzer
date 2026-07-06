@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>입력 분석</title>
+<style>/*__STYLE_CSS__*/</style>
+</head>
+<body>
+<h1>입력 분석</h1>
+
+<div id="emptyNote" class="panel empty-note" style="display:none">
+  기록된 입력 데이터가 없습니다.
+</div>
+
+<div id="mainPanels">
+  <div class="panel">
+    <h2>시점 / 키 필터</h2>
+    <div class="row">
+      <div class="field">
+        <label>시작 시점</label>
+        <input type="datetime-local" id="rangeStart" step="1" />
+      </div>
+      <div class="field">
+        <label>종료 시점</label>
+        <input type="datetime-local" id="rangeEnd" step="1" />
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <div class="row">
+          <button id="selectAllKeys">전체 선택</button>
+          <button id="selectNoneKeys">전체 해제</button>
+        </div>
+      </div>
+    </div>
+    <div id="keyGrid" class="key-grid"></div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="ips">IPS</button>
+    <button class="tab-btn" data-tab="details">눌린 키 상세</button>
+  </div>
+
+  <div class="panel tab-panel" data-tab-panel="ips">
+    <h2>Input Per Sec (IPS)</h2>
+    <div class="row">
+      <span style="font-size:12px;opacity:0.7">집계 단위</span>
+      <button data-bucket="1000" class="active">1s</button>
+      <button data-bucket="500">500ms</button>
+      <button data-bucket="100">100ms</button>
+      <span style="width:16px"></span>
+      <span style="font-size:12px;opacity:0.7">plot 종류</span>
+      <button data-ips-type="line" class="active">일반 plot</button>
+      <button data-ips-type="bar">bar plot</button>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-box"><div class="label">평균</div><div class="value" id="statAvg">-</div></div>
+      <div class="stat-box"><div class="label">최대</div><div class="value" id="statMax">-</div></div>
+      <div class="stat-box"><div class="label">최소</div><div class="value" id="statMin">-</div></div>
+      <div class="stat-box"><div class="label">중간값</div><div class="value" id="statMed">-</div></div>
+    </div>
+    <div class="chart-wrap"><canvas id="ipsChart"></canvas></div>
+  </div>
+
+  <div class="panel tab-panel tab-hidden" data-tab-panel="details">
+    <h2>눌린 키 상세 plot</h2>
+    <div class="row">
+      <span style="font-size:12px;opacity:0.7">view 형태</span>
+      <button data-key-mode="raster" class="active">event plot</button>
+      <button data-key-mode="timing">timing diagram</button>
+    </div>
+    <div id="keyPlots"></div>
+  </div>
+</div>
+
+<script>/*__HAMMER_JS__*/</script>
+<script>/*__CHART_JS__*/</script>
+<script>/*__ZOOM_JS__*/</script>
+<script>
+window.__EVENTS__ = /*__EVENTS_JSON__*/;
+</script>
+<script>/*__APP_JS__*/</script>
+</body>
+</html>

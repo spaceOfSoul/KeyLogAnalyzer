@@ -6,9 +6,11 @@
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <atomic>
+#include <algorithm>
 #include <stdint.h>
 #include <string>
 #include <strsafe.h>
+#include <vector>
 
 #pragma comment(lib, "Shlwapi.lib")
 
@@ -19,9 +21,11 @@ static const UINT WMAPP_TRAY = WM_APP + 1;
 
 static HHOOK g_hHook = nullptr;
 static HWND  g_hWnd = nullptr;
+static HINSTANCE g_hInst = nullptr;
 static NOTIFYICONDATA nid = { 0 };
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+void OpenAnalysisReport();
 
 // ------------------------------
 // Logging
@@ -513,6 +517,7 @@ void ShowTrayMenu(HWND hWnd)
     if (!hMenu) return;
 
     AppendMenuW(hMenu, MF_STRING, 2001, L"로그 조회");
+    AppendMenuW(hMenu, MF_STRING, 2003, L"입력 분석");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, 2002, L"종료");
 
@@ -540,11 +545,320 @@ void RemoveTrayIcon()
 }
 
 // ------------------------------
+// Analysis report (로그 CSV 전체를 집계해 분석용 HTML을 생성하고 기본 브라우저로 연다)
+// ------------------------------
+static bool BuildAssetsDir(wchar_t* outPath, DWORD cchOut)
+{
+    if (!outPath || cchOut == 0) return false;
+    if (!GetModuleFileNameW(nullptr, outPath, cchOut)) return false;
+    PathRemoveFileSpecW(outPath);
+    return PathAppendW(outPath, L"analysis") == TRUE;
+}
+
+static bool BuildLogsDir(wchar_t* outPath, DWORD cchOut)
+{
+    if (!outPath || cchOut == 0) return false;
+
+    PWSTR localAppData = nullptr;
+    HRESULT hr = SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData);
+    if (FAILED(hr) || !localAppData) return false;
+
+    wsprintfW(outPath, L"%s\\WinKeyCollector\\logs", localAppData);
+    CoTaskMemFree(localAppData);
+    return true;
+}
+
+static bool ReadFileAllText(const wchar_t* path, std::string& out)
+{
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 || size.QuadPart > (1i64 << 30)) {
+        CloseHandle(hFile);
+        return false;
+    }
+
+    out.resize((size_t)size.QuadPart);
+    DWORD readTotal = 0;
+    bool ok = true;
+    if (size.QuadPart > 0) {
+        ok = ReadFile(hFile, &out[0], (DWORD)size.QuadPart, &readTotal, nullptr) != FALSE;
+    }
+    CloseHandle(hFile);
+    return ok && (uint64_t)readTotal == (uint64_t)size.QuadPart;
+}
+
+static void JsonEscapeAppend(std::string& out, const char* s)
+{
+    for (const char* p = s; p && *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                wsprintfA(buf, "\\u%04x", c);
+                out += buf;
+            }
+            else {
+                out += (char)c;
+            }
+        }
+    }
+}
+
+// CSV 한 줄을 파싱: local_time,utc_filetime_100ns,qpc,qpc_freq,hook_time_ms,
+//                  msg,vk,scan,flags,key_name,injected,blocked,extraInfoLow,dropped_total
+// key_name(9번째 컬럼)은 큰따옴표로 감싸져 있고 내부 "" 는 이스케이프된 " 이다.
+static bool ParseCsvLine(const std::string& line, uint64_t& outFt100, DWORD& outMsg, std::string& outKeyName)
+{
+    size_t pos = 0;
+    int col = 0;
+    size_t ft100Start = std::string::npos, ft100End = 0;
+    size_t msgStart = std::string::npos, msgEnd = 0;
+
+    while (col < 9) {
+        if (col == 1) ft100Start = pos;
+        size_t comma = line.find(',', pos);
+        if (comma == std::string::npos) return false;
+        if (col == 1) ft100End = comma;
+        if (col == 5) { msgStart = pos; msgEnd = comma; }
+        pos = comma + 1;
+        col++;
+    }
+
+    if (ft100Start == std::string::npos || msgStart == std::string::npos) return false;
+
+    outFt100 = 0;
+    for (size_t i = ft100Start; i < ft100End; i++) {
+        char c = line[i];
+        if (c < '0' || c > '9') return false;
+        outFt100 = outFt100 * 10ULL + (uint64_t)(c - '0');
+    }
+
+    outMsg = 0;
+    for (size_t i = msgStart; i < msgEnd; i++) {
+        char c = line[i];
+        if (c < '0' || c > '9') return false;
+        outMsg = outMsg * 10 + (DWORD)(c - '0');
+    }
+
+    // col == 9, key_name 시작. 반드시 "로 시작한다고 가정.
+    if (pos >= line.size() || line[pos] != '"') return false;
+    pos++;
+    outKeyName.clear();
+    while (pos < line.size()) {
+        if (line[pos] == '"') {
+            if (pos + 1 < line.size() && line[pos + 1] == '"') {
+                outKeyName += '"';
+                pos += 2;
+                continue;
+            }
+            break;
+        }
+        outKeyName += line[pos];
+        pos++;
+    }
+
+    return true;
+}
+
+static const uint64_t kFileTimeEpochDiffMs = 11644473600000ULL; // 1601-01-01 -> 1970-01-01, ms
+
+static uint64_t FileTime100nsToUnixMs(uint64_t ft100)
+{
+    uint64_t ms = ft100 / 10000ULL;
+    return (ms > kFileTimeEpochDiffMs) ? (ms - kFileTimeEpochDiffMs) : 0;
+}
+
+struct AnalysisEvent
+{
+    uint64_t tMs;
+    bool isDown;
+    std::string key;
+};
+
+static void CollectLogFiles(const wchar_t* logsDir, std::vector<std::wstring>& outFiles)
+{
+    wchar_t pattern[1024] = { 0 };
+    wsprintfW(pattern, L"%s\\log_*.csv", logsDir);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            wchar_t full[1024] = { 0 };
+            wsprintfW(full, L"%s\\%s", logsDir, fd.cFileName);
+            outFiles.push_back(full);
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+}
+
+static void ParseLogFile(const wchar_t* path, std::vector<AnalysisEvent>& outEvents)
+{
+    HANDLE hFile = CreateFileW(path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    const DWORD BUF = 1 << 16;
+    char buf[BUF];
+    DWORD rd = 0;
+    std::string carry;
+    bool headerSkipped = false;
+
+    while (ReadFile(hFile, buf, BUF, &rd, nullptr) && rd > 0) {
+        carry.append(buf, buf + rd);
+        size_t pos = 0;
+        for (;;) {
+            size_t nl = carry.find('\n', pos);
+            if (nl == std::string::npos) {
+                carry.erase(0, pos);
+                break;
+            }
+            std::string line = carry.substr(pos, nl - pos);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            pos = nl + 1;
+
+            if (!headerSkipped) { headerSkipped = true; continue; }
+            if (line.empty()) continue;
+
+            uint64_t ft100 = 0;
+            DWORD msg = 0;
+            std::string keyName;
+            if (!ParseCsvLine(line, ft100, msg, keyName)) continue;
+            if (keyName.empty()) continue;
+
+            bool isDown = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+            bool isUp = (msg == WM_KEYUP || msg == WM_SYSKEYUP);
+            if (!isDown && !isUp) continue;
+
+            AnalysisEvent e;
+            e.tMs = FileTime100nsToUnixMs(ft100);
+            e.isDown = isDown;
+            e.key = std::move(keyName);
+            outEvents.push_back(std::move(e));
+        }
+    }
+
+    CloseHandle(hFile);
+}
+
+static std::string BuildEventsJson(const std::vector<AnalysisEvent>& events)
+{
+    std::string json;
+    json.reserve(events.size() * 32 + 2);
+    json += '[';
+    bool first = true;
+    for (const auto& e : events) {
+        if (!first) json += ',';
+        first = false;
+        char head[64];
+        StringCchPrintfA(head, ARRAYSIZE(head), "{\"t\":%llu,\"d\":%s,\"k\":\"",
+            (unsigned long long)e.tMs, e.isDown ? "true" : "false");
+        json += head;
+        JsonEscapeAppend(json, e.key.c_str());
+        json += "\"}";
+    }
+    json += ']';
+    return json;
+}
+
+static bool BuildAnalysisHtml(wchar_t* outPath, DWORD outCch)
+{
+    wchar_t logsDir[1024] = { 0 };
+    if (!BuildLogsDir(logsDir, ARRAYSIZE(logsDir))) return false;
+
+    std::vector<std::wstring> files;
+    CollectLogFiles(logsDir, files);
+
+    std::vector<AnalysisEvent> events;
+    for (const auto& f : files) {
+        ParseLogFile(f.c_str(), events);
+    }
+    std::sort(events.begin(), events.end(),
+        [](const AnalysisEvent& a, const AnalysisEvent& b) { return a.tMs < b.tMs; });
+
+    wchar_t assetsDir[1024] = { 0 };
+    if (!BuildAssetsDir(assetsDir, ARRAYSIZE(assetsDir))) return false;
+
+    wchar_t p[1200];
+    std::string tpl, css, hammerJs, chartJs, zoomJs, appJs;
+
+    wsprintfW(p, L"%s\\template.html", assetsDir);
+    if (!ReadFileAllText(p, tpl)) return false;
+
+    wsprintfW(p, L"%s\\style.css", assetsDir);
+    ReadFileAllText(p, css);
+
+    wsprintfW(p, L"%s\\vendor\\hammer.min.js", assetsDir);
+    ReadFileAllText(p, hammerJs);
+
+    wsprintfW(p, L"%s\\vendor\\chart.umd.min.js", assetsDir);
+    ReadFileAllText(p, chartJs);
+
+    wsprintfW(p, L"%s\\vendor\\chartjs-plugin-zoom.min.js", assetsDir);
+    ReadFileAllText(p, zoomJs);
+
+    wsprintfW(p, L"%s\\app.js", assetsDir);
+    ReadFileAllText(p, appJs);
+
+    std::string eventsJson = BuildEventsJson(events);
+
+    auto replaceOne = [](std::string& s, const char* token, const std::string& value) {
+        size_t pos = s.find(token);
+        if (pos == std::string::npos) return;
+        s.replace(pos, lstrlenA(token), value);
+        };
+
+    replaceOne(tpl, "/*__STYLE_CSS__*/", css);
+    replaceOne(tpl, "/*__HAMMER_JS__*/", hammerJs);
+    replaceOne(tpl, "/*__CHART_JS__*/", chartJs);
+    replaceOne(tpl, "/*__ZOOM_JS__*/", zoomJs);
+    replaceOne(tpl, "/*__EVENTS_JSON__*/", eventsJson);
+    replaceOne(tpl, "/*__APP_JS__*/", appJs);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wsprintfW(outPath, L"%s\\analysis_%04u%02u%02u_%02u%02u%02u.html",
+        logsDir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    HANDLE hOut = CreateFileW(outPath, GENERIC_WRITE, FILE_SHARE_READ,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hOut == INVALID_HANDLE_VALUE) return false;
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(hOut, tpl.data(), (DWORD)tpl.size(), &written, nullptr);
+    CloseHandle(hOut);
+
+    return ok && written == tpl.size();
+}
+
+void OpenAnalysisReport()
+{
+    wchar_t outPath[1024] = { 0 };
+    if (!BuildAnalysisHtml(outPath, ARRAYSIZE(outPath))) return;
+    ShellExecuteW(nullptr, L"open", outPath, nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// ------------------------------
 // Entry
 // ------------------------------
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
 {
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    g_hInst = hInst;
 
     EnsureAutoStart();
 
@@ -569,7 +883,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         DestroyWindow(g_hWnd);
         return 1;
     }
-
+    
     g_hHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, nullptr, 0);
     if (!g_hHook) {
         RemoveTrayIcon();
@@ -616,6 +930,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == 2001) {
             g_dumpSeconds.store(3600, std::memory_order_release);
             if (g_dumpEvent) SetEvent(g_dumpEvent);
+        }
+        else if (LOWORD(wParam) == 2003) {
+            OpenAnalysisReport();
         }
         else if (LOWORD(wParam) == 2002) {
             DestroyWindow(hWnd);

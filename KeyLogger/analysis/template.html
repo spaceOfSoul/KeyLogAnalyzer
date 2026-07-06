@@ -6,10 +6,16 @@
 <style>/*__STYLE_CSS__*/</style>
 </head>
 <body>
-<h1>입력 분석</h1>
+<div class="page-header">
+  <h1>입력 분석</h1>
+  <div class="refresh-area">
+    <button id="refreshBtn">⟳ 데이터 갱신</button>
+    <span id="refreshStatus" class="refresh-status"></span>
+  </div>
+</div>
 
 <div id="emptyNote" class="panel empty-note" style="display:none">
-  기록된 입력 데이터가 없습니다.
+  기록된 입력 데이터가 없습니다. ("데이터 갱신" 버튼으로 다시 시도해 보세요.)
 </div>
 
 <div id="mainPanels">
@@ -94,6 +100,7 @@
 <script>/*__ZOOM_JS__*/</script>
 <script>
 window.__EVENTS__ = /*__EVENTS_JSON__*/;
+window.__REFRESH_URL__ = /*__REFRESH_URL_JSON__*/;
 </script>
 <script>/*__APP_JS__*/</script>
 </body>

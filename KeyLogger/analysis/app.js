@@ -1,5 +1,6 @@
 (function () {
-  const RAW_EVENTS = Array.isArray(window.__EVENTS__) ? window.__EVENTS__ : [];
+  let RAW_EVENTS = Array.isArray(window.__EVENTS__) ? window.__EVENTS__ : [];
+  let allKeys = [];
 
   const state = {
     rangeStart: 0,
@@ -406,6 +407,70 @@
     render();
   }
 
+  function recomputeDataBounds() {
+    if (RAW_EVENTS.length === 0) return;
+    const times = RAW_EVENTS.map((e) => e.t);
+    state.dataMin = Math.min(...times);
+    state.dataMax = Math.max(...times);
+  }
+
+  function rebuildKeyList() {
+    allKeys = getDistinctKeys();
+    buildKeyFilterUI(allKeys, els.keySearch.value);
+  }
+
+  // 데이터가 처음으로 채워졌을 때(최초 로드 또는 빈 상태에서의 첫 갱신) 기본 시점 범위를 설정한다.
+  function activateWithData() {
+    recomputeDataBounds();
+    state.viewNow = Date.now();
+    state.rangeEnd = state.viewNow;
+    state.rangeStart = state.viewNow - 10 * 60 * 1000;
+    els.startInput.value = fmtDateTimeLocal(state.rangeStart);
+    els.endInput.value = fmtDateTimeLocal(state.rangeEnd);
+    rebuildKeyList();
+    els.emptyNote.style.display = 'none';
+    document.getElementById('mainPanels').style.display = '';
+  }
+
+  function setRefreshStatus(text, isError) {
+    els.refreshStatus.textContent = text;
+    els.refreshStatus.classList.toggle('error', !!isError);
+  }
+
+  async function refreshData() {
+    const wasEmpty = RAW_EVENTS.length === 0;
+    els.refreshBtn.disabled = true;
+    setRefreshStatus('갱신 중...', false);
+    try {
+      const res = await fetch(window.__REFRESH_URL__, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const events = await res.json();
+      if (!Array.isArray(events)) throw new Error('invalid response');
+
+      RAW_EVENTS = events;
+      recomputeDataBounds();
+      rebuildKeyList();
+
+      if (wasEmpty && RAW_EVENTS.length > 0) {
+        activateWithData();
+      } else {
+        // 종료 시점을 갱신 시점(현재)으로 계속 따라가게 한다.
+        state.viewNow = Date.now();
+        state.rangeEnd = state.viewNow;
+        els.endInput.value = fmtDateTimeLocal(state.rangeEnd);
+      }
+
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      setRefreshStatus(`마지막 갱신: ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`, false);
+      render();
+    } catch (err) {
+      setRefreshStatus('갱신 실패 (분석 서버에 연결할 수 없습니다)', true);
+    } finally {
+      els.refreshBtn.disabled = false;
+    }
+  }
+
   function init() {
     els.startInput = document.getElementById('rangeStart');
     els.endInput = document.getElementById('rangeEnd');
@@ -428,6 +493,8 @@
     els.ipsResizeHandle = document.getElementById('ipsResizeHandle');
     els.keyPlots = document.getElementById('keyPlots');
     els.emptyNote = document.getElementById('emptyNote');
+    els.refreshBtn = document.getElementById('refreshBtn');
+    els.refreshStatus = document.getElementById('refreshStatus');
 
     if (typeof Chart !== 'undefined' && window.ChartZoom) {
       Chart.register(window.ChartZoom);
@@ -435,28 +502,18 @@
 
     makeVerticallyResizable(els.ipsChartWrap, els.ipsResizeHandle, () => ipsChart, { minHeight: 150, maxHeight: 900 });
 
+    els.refreshBtn.addEventListener('click', refreshData);
+
+    els.keySearch.addEventListener('input', () => {
+      buildKeyFilterUI(allKeys, els.keySearch.value);
+    });
+
     if (RAW_EVENTS.length === 0) {
       els.emptyNote.style.display = 'block';
       document.getElementById('mainPanels').style.display = 'none';
-      return;
+    } else {
+      activateWithData();
     }
-
-    const times = RAW_EVENTS.map((e) => e.t);
-    state.dataMin = Math.min(...times);
-    state.dataMax = Math.max(...times);
-    state.viewNow = Date.now();
-
-    state.rangeEnd = state.viewNow;
-    state.rangeStart = state.viewNow - 10 * 60 * 1000;
-    els.startInput.value = fmtDateTimeLocal(state.rangeStart);
-    els.endInput.value = fmtDateTimeLocal(state.rangeEnd);
-
-    const keys = getDistinctKeys();
-    buildKeyFilterUI(keys, els.keySearch.value);
-
-    els.keySearch.addEventListener('input', () => {
-      buildKeyFilterUI(keys, els.keySearch.value);
-    });
 
     els.startInput.addEventListener('change', () => {
       const v = parseDateTimeLocal(els.startInput.value);
@@ -472,13 +529,13 @@
     });
 
     els.selectAllBtn.addEventListener('click', () => {
-      state.selectedKeys = new Set(keys);
-      buildKeyFilterUI(keys, els.keySearch.value);
+      state.selectedKeys = new Set(allKeys);
+      buildKeyFilterUI(allKeys, els.keySearch.value);
       render();
     });
     els.selectNoneBtn.addEventListener('click', () => {
       state.selectedKeys.clear();
-      buildKeyFilterUI(keys, els.keySearch.value);
+      buildKeyFilterUI(allKeys, els.keySearch.value);
       render();
     });
 

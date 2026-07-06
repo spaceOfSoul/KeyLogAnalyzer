@@ -1,10 +1,13 @@
 ﻿#define UNICODE
 #define _WIN32_WINNT 0x0601
+#define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <shlobj.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <atomic>
 #include <algorithm>
 #include <stdint.h>
@@ -13,11 +16,13 @@
 #include <vector>
 
 #pragma comment(lib, "Shlwapi.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
 static const wchar_t* kWndClass = L"WinKeyCollectorHiddenWindow";
 static const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const wchar_t* kRunName = L"WinKeyCollector";
 static const UINT WMAPP_TRAY = WM_APP + 1;
+static const unsigned short kHttpServerPort = 58193; // 127.0.0.1 전용, 분석 페이지의 "갱신" 버튼이 사용
 
 static HHOOK g_hHook = nullptr;
 static HWND  g_hWnd = nullptr;
@@ -774,10 +779,12 @@ static std::string BuildEventsJson(const std::vector<AnalysisEvent>& events)
     return json;
 }
 
-static bool BuildAnalysisHtml(wchar_t* outPath, DWORD outCch)
+// 모든 log_*.csv를 다시 읽어 최신 이벤트 JSON을 만든다.
+// (분석 HTML 최초 생성 시, 그리고 로컬 HTTP 서버의 /events.json 응답 시 공통으로 사용)
+static std::string BuildEventsJsonFromLogs()
 {
     wchar_t logsDir[1024] = { 0 };
-    if (!BuildLogsDir(logsDir, ARRAYSIZE(logsDir))) return false;
+    if (!BuildLogsDir(logsDir, ARRAYSIZE(logsDir))) return "[]";
 
     std::vector<std::wstring> files;
     CollectLogFiles(logsDir, files);
@@ -788,6 +795,16 @@ static bool BuildAnalysisHtml(wchar_t* outPath, DWORD outCch)
     }
     std::sort(events.begin(), events.end(),
         [](const AnalysisEvent& a, const AnalysisEvent& b) { return a.tMs < b.tMs; });
+
+    return BuildEventsJson(events);
+}
+
+static bool BuildAnalysisHtml(wchar_t* outPath, DWORD outCch)
+{
+    wchar_t logsDir[1024] = { 0 };
+    if (!BuildLogsDir(logsDir, ARRAYSIZE(logsDir))) return false;
+
+    std::string eventsJson = BuildEventsJsonFromLogs();
 
     wchar_t assetsDir[1024] = { 0 };
     if (!BuildAssetsDir(assetsDir, ARRAYSIZE(assetsDir))) return false;
@@ -813,7 +830,8 @@ static bool BuildAnalysisHtml(wchar_t* outPath, DWORD outCch)
     wsprintfW(p, L"%s\\app.js", assetsDir);
     ReadFileAllText(p, appJs);
 
-    std::string eventsJson = BuildEventsJson(events);
+    char refreshUrl[128];
+    wsprintfA(refreshUrl, "\"http://127.0.0.1:%u/events.json\"", (unsigned)kHttpServerPort);
 
     auto replaceOne = [](std::string& s, const char* token, const std::string& value) {
         size_t pos = s.find(token);
@@ -826,6 +844,7 @@ static bool BuildAnalysisHtml(wchar_t* outPath, DWORD outCch)
     replaceOne(tpl, "/*__CHART_JS__*/", chartJs);
     replaceOne(tpl, "/*__ZOOM_JS__*/", zoomJs);
     replaceOne(tpl, "/*__EVENTS_JSON__*/", eventsJson);
+    replaceOne(tpl, "/*__REFRESH_URL_JSON__*/", std::string(refreshUrl));
     replaceOne(tpl, "/*__APP_JS__*/", appJs);
 
     SYSTEMTIME st;
@@ -852,6 +871,97 @@ void OpenAnalysisReport()
 }
 
 // ------------------------------
+// Analysis 페이지의 "갱신" 버튼용 로컬 HTTP 서버.
+// 127.0.0.1(루프백)에만 바인딩하며, GET /events.json 하나만 응답한다.
+// ------------------------------
+static SOCKET g_httpListenSocket = INVALID_SOCKET;
+static HANDLE g_httpThread = nullptr;
+static std::atomic<bool> g_httpStop{ false };
+
+static void SendHttpResponse(SOCKET client, int statusCode, const char* statusText,
+    const char* contentType, const std::string& body)
+{
+    char header[512];
+    StringCchPrintfA(header, ARRAYSIZE(header),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        statusCode, statusText, contentType, body.size());
+    send(client, header, (int)lstrlenA(header), 0);
+    if (!body.empty()) 
+        send(client, body.data(), (int)body.size(), 0);
+}
+
+static void HandleHttpClient(SOCKET client)
+{
+    char buf[2048] = { 0 };
+    int n = recv(client, buf, sizeof(buf) - 1, 0);
+    if (n > 0) {
+        buf[n] = 0;
+        const char* kEventsPath = "GET /events.json";
+        if (StrCmpNA(buf, kEventsPath, lstrlenA(kEventsPath)) == 0) {
+            std::string json = BuildEventsJsonFromLogs();
+            SendHttpResponse(client, 200, "OK", "application/json; charset=utf-8", json);
+        }
+        else {
+            SendHttpResponse(client, 404, "Not Found", "text/plain", "not found");
+        }
+    }
+    shutdown(client, SD_SEND);
+    closesocket(client);
+}
+
+static DWORD WINAPI HttpServerThreadProc(LPVOID)
+{
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+
+    g_httpListenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (g_httpListenSocket == INVALID_SOCKET) {
+        WSACleanup();
+        return 0;
+    }
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    addr.sin_port = htons(kHttpServerPort);
+
+    if (bind(g_httpListenSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR ||
+        listen(g_httpListenSocket, SOMAXCONN) == SOCKET_ERROR) {
+        // 포트 충돌 등으로 실패하면 조용히 갱신 기능만 비활성화된 채로 둔다.
+        closesocket(g_httpListenSocket);
+        g_httpListenSocket = INVALID_SOCKET;
+        WSACleanup();
+        return 0;
+    }
+
+    while (!g_httpStop.load(std::memory_order_relaxed)) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(g_httpListenSocket, &fds);
+        timeval tv{ 1, 0 };
+
+        int sel = select(0, &fds, nullptr, nullptr, &tv);
+        if (sel <= 0) continue;
+
+        SOCKET client = accept(g_httpListenSocket, nullptr, nullptr);
+        if (client == INVALID_SOCKET) continue;
+
+        HandleHttpClient(client);
+    }
+
+    closesocket(g_httpListenSocket);
+    g_httpListenSocket = INVALID_SOCKET;
+    WSACleanup();
+    return 0;
+}
+
+// ------------------------------
 // Entry
 // ------------------------------
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
@@ -869,6 +979,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     if (g_logEvent && g_stopEvent && g_dumpEvent) {
         g_logThread = CreateThread(nullptr, 0, LogThreadProc, nullptr, 0, nullptr);
     }
+
+    g_httpThread = CreateThread(nullptr, 0, HttpServerThreadProc, nullptr, 0, nullptr);
 
     WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
     wc.lpfnWndProc = WndProc;
@@ -909,6 +1021,13 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     if (g_logEvent) { CloseHandle(g_logEvent);  g_logEvent = nullptr; }
     if (g_dumpEvent) { CloseHandle(g_dumpEvent); g_dumpEvent = nullptr; }
     if (g_stopEvent) { CloseHandle(g_stopEvent); g_stopEvent = nullptr; }
+
+    g_httpStop.store(true, std::memory_order_relaxed);
+    if (g_httpThread) {
+        WaitForSingleObject(g_httpThread, 2000);
+        CloseHandle(g_httpThread);
+        g_httpThread = nullptr;
+    }
 
     RemoveTrayIcon();
 

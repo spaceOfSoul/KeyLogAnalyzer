@@ -14,8 +14,20 @@ body {
   color: canvastext;
 }
 
-h1 { font-size: 18px; margin: 0 0 12px; }
+h1 { font-size: 18px; margin: 0; }
 h2 { font-size: 15px; margin: 0 0 8px; }
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.refresh-area { display: flex; align-items: center; gap: 8px; }
+#refreshBtn { font-weight: 600; }
+#refreshBtn:disabled { opacity: 0.5; cursor: default; }
+.refresh-status { font-size: 12px; opacity: 0.7; }
+.refresh-status.error { color: #ef4444; opacity: 1; }
 
 .panel {
   background: var(--panel);
